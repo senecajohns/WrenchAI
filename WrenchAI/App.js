@@ -1,6 +1,3 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
-
 import React, { useState, useEffect } from 'react';
 import { 
   StyleSheet, 
@@ -9,14 +6,21 @@ import {
   TouchableOpacity, 
   ScrollView,
   ActivityIndicator,
-  Alert 
+  Alert,
+  Platform,
+  TextInput,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 
 // Services
 import obdService from './src/services/obdService';
 import nhtsaService from './src/services/nhtsaService';
-import aiService from './src/services/aiService';
+import partsService from './src/services/partsService';
+
+// Backend URL - update for production
+const BACKEND_URL = __DEV__ 
+  ? 'http://localhost:3000' 
+  : 'https://your-production-url.com';
 
 export default function App() {
   const [isScanning, setIsScanning] = useState(false);
@@ -26,6 +30,8 @@ export default function App() {
   const [dtcs, setDtcs] = useState([]);
   const [aiInterpretation, setAiInterpretation] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [manualVIN, setManualVIN] = useState('');
+  const [partsLinks, setPartsLinks] = useState([]);
 
   const scanForOBD = async () => {
     setIsScanning(true);
@@ -39,7 +45,11 @@ export default function App() {
         Alert.alert('No OBD devices found', 'Make sure your OBD dongle is powered on and in range.');
       }
     } catch (error) {
-      Alert.alert('Scan Error', error.message);
+      if (error.message.includes('permission')) {
+        Alert.alert('Permission Required', 'Please grant Bluetooth permissions to scan for OBD devices.');
+      } else {
+        Alert.alert('Scan Error', error.message);
+      }
     } finally {
       setIsScanning(false);
     }
@@ -69,12 +79,14 @@ export default function App() {
     try {
       // Get VIN from OBD
       const vin = await obdService.getVIN();
+      let currentVehicleInfo = null;
       
-      if (vin && vin !== 'PARSING_NOT_IMPLEMENTED') {
+      if (vin && vin.length === 17) {
         // Decode VIN with NHTSA
         const vinData = await nhtsaService.decodeVINValues(vin);
         if (vinData.success) {
-          setVehicleInfo(vinData.data);
+          currentVehicleInfo = vinData.data;
+          setVehicleInfo(currentVehicleInfo);
         }
       }
 
@@ -82,15 +94,68 @@ export default function App() {
       const codes = await obdService.getDTCs();
       setDtcs(codes);
 
-      // Get AI interpretation
+      // Get AI interpretation via backend
       if (codes.length > 0) {
-        const interpretation = await aiService.interpretDTCs(codes, vehicleInfo);
-        if (interpretation.success) {
-          setAiInterpretation(interpretation.interpretation);
-        }
+        await getAIInterpretation(codes, currentVehicleInfo);
+        
+        // Get parts links for first DTC
+        const links = partsService.getCommonPartsForDTC(codes[0].code, currentVehicleInfo);
+        setPartsLinks(links);
       }
     } catch (error) {
       console.error('Error reading vehicle data:', error);
+      Alert.alert('Read Error', 'Failed to read vehicle data. Please try again.');
+    }
+  };
+
+  const getAIInterpretation = async (codes, vInfo) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/interpret-dtcs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          dtcs: codes,
+          vehicleInfo: vInfo ? {
+            year: vInfo.ModelYear,
+            make: vInfo.Make,
+            model: vInfo.Model,
+          } : null,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setAiInterpretation(data.interpretation);
+      } else {
+        setAiInterpretation('Unable to get AI interpretation. Please try again.');
+      }
+    } catch (error) {
+      console.error('AI interpretation error:', error);
+      setAiInterpretation('Backend unavailable. Please check your connection.');
+    }
+  };
+
+  const lookupManualVIN = async () => {
+    if (manualVIN.length !== 17) {
+      Alert.alert('Invalid VIN', 'VIN must be exactly 17 characters.');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const vinData = await nhtsaService.decodeVINValues(manualVIN);
+      if (vinData.success) {
+        setVehicleInfo(vinData.data);
+        Alert.alert('Success', `Found: ${vinData.data.ModelYear} ${vinData.data.Make} ${vinData.data.Model}`);
+      } else {
+        Alert.alert('Error', 'Could not decode VIN. Please check and try again.');
+      }
+    } catch (error) {
+      Alert.alert('Error', error.message);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -101,6 +166,7 @@ export default function App() {
     setVehicleInfo(null);
     setDtcs([]);
     setAiInterpretation('');
+    setPartsLinks([]);
   };
 
   return (
@@ -161,7 +227,7 @@ export default function App() {
             {dtcs.map((dtc, index) => (
               <View key={index} style={styles.dtcRow}>
                 <Text style={styles.dtcCode}>{dtc.code}</Text>
-                <Text style={styles.dtcDescription}>{dtc.description}</Text>
+                <Text style={styles.dtcDescription}>{dtc.description || 'Tap for details'}</Text>
               </View>
             ))}
           </View>
@@ -175,14 +241,45 @@ export default function App() {
           </View>
         ) : null}
 
+        {/* Parts Links */}
+        {partsLinks.length > 0 && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Parts You May Need</Text>
+            {partsLinks.map((part, index) => (
+              <View key={index} style={styles.partRow}>
+                <Text style={styles.partName}>{part.name}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
         {/* Manual VIN Entry (fallback) */}
         {!isConnected && !vehicleInfo && (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Manual Entry</Text>
+            <Text style={styles.cardTitle}>Manual VIN Entry</Text>
             <Text style={styles.hintText}>
-              Don't have an OBD device? Enter your VIN manually for vehicle info.
+              Don't have an OBD device? Enter your VIN manually.
             </Text>
-            {/* TODO: Add VIN input field */}
+            <TextInput
+              style={styles.vinInput}
+              placeholder="Enter 17-character VIN"
+              placeholderTextColor="#666"
+              value={manualVIN}
+              onChangeText={setManualVIN}
+              maxLength={17}
+              autoCapitalize="characters"
+            />
+            <TouchableOpacity 
+              style={[styles.button, { marginTop: 10 }]} 
+              onPress={lookupManualVIN}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>Lookup VIN</Text>
+              )}
+            </TouchableOpacity>
           </View>
         )}
       </ScrollView>
@@ -287,5 +384,23 @@ const styles = StyleSheet.create({
     color: '#a0a0a0',
     fontSize: 12,
     lineHeight: 18,
+    marginBottom: 10,
+  },
+  vinInput: {
+    backgroundColor: '#1a1a2e',
+    borderRadius: 8,
+    padding: 12,
+    color: '#fff',
+    fontSize: 16,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  partRow: {
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a2e',
+  },
+  partName: {
+    color: '#fff',
+    fontSize: 14,
   },
 });

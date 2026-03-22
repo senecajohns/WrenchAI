@@ -3,11 +3,39 @@
 
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// CORS configuration
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',') 
+  : ['http://localhost:3000', 'http://localhost:19006']; // Dev defaults
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    return callback(new Error('Not allowed by CORS'));
+  }
+}));
+
+// Body parsing with size limit
+app.use(express.json({ limit: '10kb' }));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: { error: 'Too many requests, please try again later.' }
+});
+app.use('/api/', limiter);
 
 const VENICE_API_URL = 'https://api.venice.ai/api/v1/chat/completions';
 const VENICE_API_KEY = process.env.VENICE_API_KEY;
@@ -17,13 +45,64 @@ if (!VENICE_API_KEY) {
   process.exit(1);
 }
 
+// Input validation middleware
+const validateDTCRequest = (req, res, next) => {
+  const { dtcs, vehicleInfo } = req.body;
+  
+  if (!dtcs || !Array.isArray(dtcs)) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'dtcs must be an array' 
+    });
+  }
+  
+  if (dtcs.length === 0) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'dtcs array cannot be empty' 
+    });
+  }
+  
+  // Validate each DTC has a code
+  for (const dtc of dtcs) {
+    if (!dtc.code || typeof dtc.code !== 'string') {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Each DTC must have a code string' 
+      });
+    }
+  }
+  
+  next();
+};
+
+const validateRepairRequest = (req, res, next) => {
+  const { dtc, vehicleInfo } = req.body;
+  
+  if (!dtc || !dtc.code) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'dtc with code is required' 
+    });
+  }
+  
+  if (!vehicleInfo || !vehicleInfo.year || !vehicleInfo.make || !vehicleInfo.model) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'vehicleInfo with year, make, and model is required' 
+    });
+  }
+  
+  next();
+};
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // Interpret DTCs
-app.post('/api/interpret-dtcs', async (req, res) => {
+app.post('/api/interpret-dtcs', validateDTCRequest, async (req, res) => {
   try {
     const { dtcs, vehicleInfo } = req.body;
     
@@ -63,6 +142,10 @@ Keep it practical and actionable.`;
       }),
     });
 
+    if (!response.ok) {
+      throw new Error(`AI API error: ${response.status}`);
+    }
+
     const data = await response.json();
     
     res.json({
@@ -76,13 +159,13 @@ Keep it practical and actionable.`;
 });
 
 // Get repair instructions
-app.post('/api/repair-instructions', async (req, res) => {
+app.post('/api/repair-instructions', validateRepairRequest, async (req, res) => {
   try {
     const { dtc, vehicleInfo } = req.body;
     
     const prompt = `Vehicle: ${vehicleInfo.year} ${vehicleInfo.make} ${vehicleInfo.model}
 
-Problem: ${dtc.code} - ${dtc.description}
+Problem: ${dtc.code} - ${dtc.description || 'Unknown issue'}
 
 Provide step-by-step DIY repair instructions:
 1. Required tools
@@ -104,6 +187,10 @@ Provide step-by-step DIY repair instructions:
       }),
     });
 
+    if (!response.ok) {
+      throw new Error(`AI API error: ${response.status}`);
+    }
+
     const data = await response.json();
     
     res.json({
@@ -111,8 +198,15 @@ Provide step-by-step DIY repair instructions:
       instructions: data.choices?.[0]?.message?.content || 'No instructions available',
     });
   } catch (error) {
+    console.error('Error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ success: false, error: 'Internal server error' });
 });
 
 const PORT = process.env.PORT || 3000;
