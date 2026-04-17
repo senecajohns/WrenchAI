@@ -5,9 +5,10 @@ import { BleManager } from 'react-native-ble-plx';
 import { Platform, PermissionsAndroid } from 'react-native';
 import { Buffer } from 'buffer'; // npm install buffer
 
-const SERVICE_UUID = '0000fff0-0000-1000-8000-00805f9b34fb';
-const TX_UUID = '0000fff1-0000-1000-8000-00805f9b34fb';
-const RX_UUID = '0000fff2-0000-1000-8000-00805f9b34fb';
+// Veepeak OBDCheck BLE UUIDs
+const SERVICE_UUID = '49535343-fe7d-4ae5-8fa9-9fafd205e455';
+const TX_UUID = '49535343-1fe4-4b5e-8a1e-7b5c5a5f3e28';    // Write (phone → OBD)
+const RX_UUID = '49535343-8841-43f4-a8d4-ecbe34729bb3';    // Notify (OBD → phone)
 
 class OBDService {
   constructor() {
@@ -57,6 +58,7 @@ class OBDService {
             (device.name.includes('OBD') || 
              device.name.includes('ELM') || 
              device.name.includes('Veepeak') ||
+             device.name.includes('Vlink') ||
              device.name.includes('Link') ||
              device.name.includes('OBDII'))) {
           deviceIds.add(device.id);
