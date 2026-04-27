@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  StyleSheet, 
-  Text, 
-  View, 
-  TouchableOpacity, 
+import React, { useState } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
   ScrollView,
   ActivityIndicator,
   Alert,
@@ -12,44 +12,45 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 
-// Services
 import obdService from './src/services/obdService';
 import nhtsaService from './src/services/nhtsaService';
 import partsService from './src/services/partsService';
+import { CONFIG } from './src/config';
 
-// Backend URL - update for production
-const BACKEND_URL = __DEV__ 
-  ? 'http://localhost:3000' 
-  : 'https://your-production-url.com';
+const BACKEND_URL = CONFIG.API_BASE_URL;
 
 export default function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [deviceName, setDeviceName] = useState('');
   const [vehicleInfo, setVehicleInfo] = useState(null);
-  const [dtcs, setDtcs] = useState([]);
+  const [dtcs, setDtcs] = useState({ confirmed: [], pending: [], permanent: [] });
   const [aiInterpretation, setAiInterpretation] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [manualVIN, setManualVIN] = useState('');
   const [partsLinks, setPartsLinks] = useState([]);
 
+  const allDTCs = [
+    ...dtcs.confirmed,
+    ...dtcs.pending,
+    ...dtcs.permanent,
+  ];
+
   const scanForOBD = async () => {
     setIsScanning(true);
     try {
-      const devices = await obdService.scanForDevices();
-      if (devices.length > 0) {
-        // For MVP, auto-connect to first found device
-        const device = devices[0];
-        await connectToDevice(device.id, device.name);
-      } else {
-        Alert.alert('No OBD devices found', 'Make sure your OBD dongle is powered on and in range.');
+      const devices = await obdService.scanForDevices(CONFIG.OBD.SCAN_TIMEOUT);
+      if (devices.length === 0) {
+        Alert.alert('No OBD Devices Found', 'Make sure your OBD dongle is powered on and in range.');
+        return;
       }
+      // Auto-connect to first found device
+      await connectToDevice(devices[0].id, devices[0].name);
     } catch (error) {
-      if (error.message.includes('permission')) {
-        Alert.alert('Permission Required', 'Please grant Bluetooth permissions to scan for OBD devices.');
-      } else {
-        Alert.alert('Scan Error', error.message);
-      }
+      const msg = error.message?.includes('permission')
+        ? 'Please grant Bluetooth permissions to scan for OBD devices.'
+        : error.message;
+      Alert.alert('Scan Error', msg);
     } finally {
       setIsScanning(false);
     }
@@ -62,8 +63,6 @@ export default function App() {
       if (result.success) {
         setIsConnected(true);
         setDeviceName(name);
-        
-        // Get VIN and decode
         await readVehicleData();
       } else {
         Alert.alert('Connection Failed', result.error);
@@ -77,12 +76,11 @@ export default function App() {
 
   const readVehicleData = async () => {
     try {
-      // Get VIN from OBD
+      // Read VIN
       const vin = await obdService.getVIN();
       let currentVehicleInfo = null;
-      
-      if (vin && vin.length === 17) {
-        // Decode VIN with NHTSA
+
+      if (vin) {
         const vinData = await nhtsaService.decodeVINValues(vin);
         if (vinData.success) {
           currentVehicleInfo = vinData.data;
@@ -90,16 +88,15 @@ export default function App() {
         }
       }
 
-      // Get DTCs
-      const codes = await obdService.getDTCs();
+      // Read all DTC modes (confirmed, pending, permanent)
+      const codes = await obdService.getAllDTCs();
       setDtcs(codes);
 
-      // Get AI interpretation via backend
-      if (codes.length > 0) {
-        await getAIInterpretation(codes, currentVehicleInfo);
-        
-        // Get parts links for first DTC
-        const links = partsService.getCommonPartsForDTC(codes[0].code, currentVehicleInfo);
+      const allCodes = [...codes.confirmed, ...codes.pending, ...codes.permanent];
+
+      if (allCodes.length > 0) {
+        await getAIInterpretation(allCodes, currentVehicleInfo);
+        const links = partsService.getCommonPartsForDTC(allCodes[0].code, currentVehicleInfo);
         setPartsLinks(links);
       }
     } catch (error) {
@@ -112,28 +109,21 @@ export default function App() {
     try {
       const response = await fetch(`${BACKEND_URL}/api/interpret-dtcs`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dtcs: codes,
-          vehicleInfo: vInfo ? {
-            year: vInfo.ModelYear,
-            make: vInfo.Make,
-            model: vInfo.Model,
-          } : null,
+          vehicleInfo: vInfo
+            ? { year: vInfo.ModelYear, make: vInfo.Make, model: vInfo.Model }
+            : null,
         }),
       });
 
       const data = await response.json();
-      if (data.success) {
-        setAiInterpretation(data.interpretation);
-      } else {
-        setAiInterpretation('Unable to get AI interpretation. Please try again.');
-      }
-    } catch (error) {
-      console.error('AI interpretation error:', error);
-      setAiInterpretation('Backend unavailable. Please check your connection.');
+      setAiInterpretation(
+        data.success ? data.interpretation : 'Unable to get AI interpretation. Please try again.'
+      );
+    } catch {
+      setAiInterpretation('Backend unavailable. Check that the WrenchAI server is running.');
     }
   };
 
@@ -164,42 +154,44 @@ export default function App() {
     setIsConnected(false);
     setDeviceName('');
     setVehicleInfo(null);
-    setDtcs([]);
+    setDtcs({ confirmed: [], pending: [], permanent: [] });
     setAiInterpretation('');
     setPartsLinks([]);
   };
 
+  const dtcTypeLabel = { confirmed: 'Confirmed', pending: 'Pending', permanent: 'Permanent' };
+
   return (
     <View style={styles.container}>
       <StatusBar style="light" />
-      
+
       <View style={styles.header}>
         <Text style={styles.title}>WrenchAI</Text>
         <Text style={styles.subtitle}>AI-Powered Car Diagnostics</Text>
       </View>
 
       <ScrollView style={styles.content}>
-        {/* Connection Status */}
+
+        {/* Connection */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>OBD Connection</Text>
           {isConnected ? (
-            <View>
-              <Text style={styles.connectedText}>✓ Connected to {deviceName}</Text>
+            <>
+              <Text style={styles.connectedText}>Connected to {deviceName}</Text>
               <TouchableOpacity style={styles.buttonSecondary} onPress={disconnect}>
                 <Text style={styles.buttonText}>Disconnect</Text>
               </TouchableOpacity>
-            </View>
+            </>
           ) : (
-            <TouchableOpacity 
-              style={styles.button} 
+            <TouchableOpacity
+              style={styles.button}
               onPress={scanForOBD}
               disabled={isScanning || isLoading}
             >
-              {isScanning || isLoading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.buttonText}>Scan for OBD Device</Text>
-              )}
+              {isScanning || isLoading
+                ? <ActivityIndicator color="#fff" />
+                : <Text style={styles.buttonText}>Scan for OBD Device</Text>
+              }
             </TouchableOpacity>
           )}
         </View>
@@ -207,29 +199,38 @@ export default function App() {
         {/* Vehicle Info */}
         {vehicleInfo && (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Vehicle Info</Text>
+            <Text style={styles.cardTitle}>Vehicle</Text>
             <Text style={styles.vehicleText}>
               {vehicleInfo.ModelYear} {vehicleInfo.Make} {vehicleInfo.Model}
             </Text>
-            {vehicleInfo.Trim && (
+            {vehicleInfo.Trim ? (
               <Text style={styles.detailText}>Trim: {vehicleInfo.Trim}</Text>
-            )}
-            {vehicleInfo.EngineModel && (
+            ) : null}
+            {vehicleInfo.EngineModel ? (
               <Text style={styles.detailText}>Engine: {vehicleInfo.EngineModel}</Text>
-            )}
+            ) : null}
           </View>
         )}
 
-        {/* DTCs */}
-        {dtcs.length > 0 && (
+        {/* DTCs — grouped by type */}
+        {allDTCs.length > 0 && (
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Diagnostic Codes</Text>
-            {dtcs.map((dtc, index) => (
-              <View key={index} style={styles.dtcRow}>
-                <Text style={styles.dtcCode}>{dtc.code}</Text>
-                <Text style={styles.dtcDescription}>{dtc.description || 'Tap for details'}</Text>
-              </View>
-            ))}
+            {['confirmed', 'pending', 'permanent'].map(type => {
+              const group = dtcs[type];
+              if (!group.length) return null;
+              return (
+                <View key={type}>
+                  <Text style={styles.dtcGroupLabel}>{dtcTypeLabel[type]}</Text>
+                  {group.map((dtc, i) => (
+                    <View key={i} style={styles.dtcRow}>
+                      <Text style={styles.dtcCode}>{dtc.code}</Text>
+                      <Text style={styles.dtcDescription}>{dtc.description || 'Tap for details'}</Text>
+                    </View>
+                  ))}
+                </View>
+              );
+            })}
           </View>
         )}
 
@@ -241,19 +242,19 @@ export default function App() {
           </View>
         ) : null}
 
-        {/* Parts Links */}
+        {/* Parts */}
         {partsLinks.length > 0 && (
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Parts You May Need</Text>
-            {partsLinks.map((part, index) => (
-              <View key={index} style={styles.partRow}>
+            {partsLinks.map((part, i) => (
+              <View key={i} style={styles.partRow}>
                 <Text style={styles.partName}>{part.name}</Text>
               </View>
             ))}
           </View>
         )}
 
-        {/* Manual VIN Entry (fallback) */}
+        {/* Manual VIN */}
         {!isConnected && !vehicleInfo && (
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Manual VIN Entry</Text>
@@ -265,23 +266,23 @@ export default function App() {
               placeholder="Enter 17-character VIN"
               placeholderTextColor="#666"
               value={manualVIN}
-              onChangeText={setManualVIN}
+              onChangeText={text => setManualVIN(text.toUpperCase())}
               maxLength={17}
               autoCapitalize="characters"
             />
-            <TouchableOpacity 
-              style={[styles.button, { marginTop: 10 }]} 
+            <TouchableOpacity
+              style={[styles.button, { marginTop: 10 }]}
               onPress={lookupManualVIN}
               disabled={isLoading}
             >
-              {isLoading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.buttonText}>Lookup VIN</Text>
-              )}
+              {isLoading
+                ? <ActivityIndicator color="#fff" />
+                : <Text style={styles.buttonText}>Lookup VIN</Text>
+              }
             </TouchableOpacity>
           </View>
         )}
+
       </ScrollView>
     </View>
   );
@@ -357,6 +358,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 4,
   },
+  dtcGroupLabel: {
+    color: '#a0a0a0',
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    marginTop: 8,
+    marginBottom: 4,
+  },
   dtcRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -378,7 +387,7 @@ const styles = StyleSheet.create({
   aiText: {
     color: '#fff',
     fontSize: 14,
-    lineHeight: 20,
+    lineHeight: 22,
   },
   hintText: {
     color: '#a0a0a0',

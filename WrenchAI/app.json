@@ -44,6 +44,7 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "expo-dev-client",
       [
         "react-native-ble-plx",
         {
@@ -55,6 +56,12 @@
           "bluetoothAlwaysPermission": "WrenchAI uses Bluetooth to connect to your car's OBD-II diagnostic port."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f159273a-79fc-4945-9ae0-76cc154f09e4"
+      }
+    },
+    "owner": "seneca.r.johns"
   }
 }
